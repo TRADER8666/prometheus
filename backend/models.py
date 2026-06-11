@@ -87,3 +87,23 @@ class VisionAnalyzeRequest(BaseModel):
 class OCRRequest(BaseModel):
     image_path: str
     langs: List[str] = Field(default_factory=lambda: ["en"])
+
+
+class PlanRequest(BaseModel):
+    request: str
+
+
+class ExecuteDAGRequest(BaseModel):
+    request: Optional[str] = None
+    plan: Optional[List[Dict[str, Any]]] = None
+    max_parallel: int = 4
+
+
+class MCPExecuteRequest(BaseModel):
+    tool: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelRecommendRequest(BaseModel):
+    task: str
+    available_models: List[str] = Field(default_factory=list)

@@ -14,3 +14,9 @@ accelerate
 easyocr
 Pillow
 opencv-python
+gitpython
+playwright
+icalendar
+pyperclip
+networkx
+websockets

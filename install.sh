@@ -78,6 +78,9 @@ install_python_ai_deps() {
 
   python3 -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
 
+  log "Installing Playwright Chromium browser..."
+  python3 -m playwright install chromium || true
+
   log "Downloading/caching YOLO model weights (yolov8n.pt)..."
   python3 - << 'PY'
 from ultralytics import YOLO

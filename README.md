@@ -1,56 +1,132 @@
 # Prometheus AI Workspace
 
-Prometheus is a locally-hostable AI workspace with chat + agent tools + vision.
+Prometheus is a locally-hostable AI workspace with:
+- local LLM chat via Ollama
+- RAG memory via ChromaDB
+- vision tools (detect/generate/edit/OCR/analyze)
+- **advanced orchestration** (DAG planning + execution + swarm + model routing + MCP)
 
-## Features
+---
 
-- Local LLM chat via **Ollama**
-- RAG / memory via **ChromaDB**
-- Agent tool loop for code/file/search/rag
-- **Vision tools**:
-  - YOLO object detection (`ultralytics`)
-  - Stable Diffusion text-to-image (`diffusers`)
-  - Stable Diffusion inpainting
-  - Ollama vision analysis (`llava` / `bakllava`)
-  - OCR via `easyocr`
-- Svelte UI with chat + dedicated vision panel
+## Core Capabilities
+
+### 1) Chat + Tool Use
+- chat endpoint with tool-invocation syntax
+- code/file/search/rag tools
+- productivity tools: git/browser/email/calendar/utilities
+
+### 2) Vision
+- YOLO object detection
+- Stable Diffusion image generation
+- Stable Diffusion inpainting
+- Ollama vision analysis (`llava`)
+- OCR (`easyocr`)
+
+### 3) Orchestration Intelligence Layer
+- DAG engine with:
+  - topological execution
+  - node states: `PENDING -> IN_PROGRESS -> COMPLETED/FAILED/SKIPPED`
+  - retry with exponential backoff
+  - parallel execution of independent nodes
+  - conditional branch support
+- Swarm coordinator with master/worker model and AMP (Agent Message Protocol)
+- Planner that decomposes natural language into DAG steps
+- Multi-model router for coding/general/reasoning/vision tasks
+- MCP server/client support
+- Real-time DAG updates via WebSocket
+
+---
 
 ## Architecture
 
-- Frontend (Svelte/Vite): `3000`
+- Frontend (Svelte + Vite): `3000`
 - Backend (FastAPI): `8000`
-- Ollama (host native): `11434`
+- Ollama (host-native): `11434`
 - ChromaDB: `8001`
 - SearXNG: `8080`
 - Nginx reverse proxy: `80`
 
-Nginx routes:
+Nginx routing:
 - `/` -> frontend
 - `/api/*` -> backend
 
-## Vision API Endpoints
+---
 
-- `POST /api/upload_image` - upload image
-- `GET /api/images/{filename}` - serve uploaded/generated image
-- `POST /api/detect_objects` - YOLO detection
-- `POST /api/generate_image` - text-to-image
-- `POST /api/edit_image` - inpainting
-- `POST /api/analyze_image` - Ollama vision analysis
-- `POST /api/extract_text` - OCR
+## API Endpoints
 
-(Backend also exposes non-prefixed aliases for direct local dev.)
+### Chat + Core
+- `POST /api/chat`
+- `POST /api/chat/stream`
+- `GET /api/conversations`
+- `POST /api/conversations`
+- `DELETE /api/conversations/{id}`
+- `GET /api/conversations/{id}/messages`
 
-## Tool Call Syntax (chat)
+### Model / Cookbook
+- `GET /api/models`
+- `POST /api/models/pull`
+- `DELETE /api/models/{model}`
+- `GET /api/cookbook/recommendations`
+- `POST /api/models/recommend`
+
+### Vision
+- `POST /api/upload_image`
+- `GET /api/images/{filename}`
+- `POST /api/detect_objects`
+- `POST /api/generate_image`
+- `POST /api/edit_image`
+- `POST /api/analyze_image`
+- `POST /api/extract_text`
+
+### Orchestration / DAG
+- `POST /api/plan`
+- `POST /api/execute_dag`
+- `GET /api/dag/{task_id}`
+- `WS /ws/dag` (real-time DAG state updates)
+
+### MCP
+- `GET /api/mcp/tools`
+- `POST /api/mcp/execute`
+- `POST /api/mcp/rpc`
+
+---
+
+## Project Structure
 
 ```text
-[[tool:detect_objects {"image_path":"/tmp/prometheus-images/sample.png"}]]
-[[tool:generate_image {"prompt":"cyberpunk city at night"}]]
-[[tool:edit_image {"image_path":"...","mask_path":"...","prompt":"add a tree"}]]
-[[tool:analyze_image {"image_path":"...","prompt":"what is in this image?"}]]
-[[tool:extract_text {"image_path":"..."}]]
+prometheus/
+├── backend/
+│   ├── orchestration/
+│   │   ├── dag_engine.py
+│   │   ├── swarm_coordinator.py
+│   │   └── planner.py
+│   ├── routing/
+│   │   └── model_router.py
+│   ├── mcp/
+│   │   ├── mcp_client.py
+│   │   ├── mcp_server.py
+│   │   └── mcp_protocol.py
+│   ├── tools/
+│   │   ├── git_tool.py
+│   │   ├── browser_tool.py
+│   │   ├── email_tool.py
+│   │   ├── calendar_tool.py
+│   │   ├── utility_tools.py
+│   │   └── ...existing tools
+│   ├── agent.py
+│   ├── main.py
+│   └── requirements.txt
+├── frontend/src/components/
+│   ├── DAGVisualizer.svelte
+│   ├── PlanPanel.svelte
+│   ├── TaskMonitor.svelte
+│   └── ...existing components
+└── install.sh
 ```
 
-## Installation
+---
+
+## Install
 
 ```bash
 git clone https://github.com/TRADER8666/prometheus.git
@@ -59,14 +135,32 @@ chmod +x install.sh
 ./install.sh
 ```
 
-`install.sh` now also:
-- installs Python AI dependencies (`torch`, `diffusers`, `ultralytics`, `easyocr`, etc.)
-- detects CPU/GPU and attempts suitable PyTorch install
-- caches YOLO model weights (`yolov8n.pt`)
-- pulls Ollama vision model (`llava`)
-- creates `backend/workspace/images`
+Installer includes:
+- Docker + Compose
+- host-native Ollama + model pulls (`llama3.2:3b`, `qwen2.5-coder:1.5b`, `nomic-embed-text`, `llava`)
+- Python AI/tool dependencies
+- Playwright Chromium install (`playwright install chromium`)
+- YOLO weight caching
+- service + LAN setup
 
-## Local Development
+---
+
+## Frontend UX
+
+Tabs in UI:
+- Chat
+- Vision / Images
+- **Orchestration** (plan generation, DAG visualization, task monitoring)
+
+DAG colors:
+- pending: gray
+- in_progress: blue
+- completed: green
+- failed: red
+
+---
+
+## Development
 
 ### Backend
 ```bash
@@ -84,8 +178,10 @@ npm install
 npm run dev
 ```
 
+---
+
 ## Notes
 
-- CPU fallback is supported for all vision features (slower).
-- Diffusion and YOLO models are lazily loaded/cached to avoid repeated downloads.
-- For production internet exposure, add auth + TLS + security hardening.
+- Heavy models may require high VRAM; CPU fallback is supported but slower.
+- Playwright/browser and diffusion features require additional runtime packages and memory.
+- Add authentication/TLS before exposing beyond LAN.

@@ -1,39 +1,47 @@
+import asyncio
 import json
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
+from agent import TOOL_MAP, get_default_agent
 from database import db_cursor, init_db, now_iso
+from mcp.mcp_server import MCPServer
 from models import (
     ChatRequest,
     ChatResponse,
     ConversationOut,
+    ExecuteDAGRequest,
+    ImageEditRequest,
+    ImageGenerateRequest,
+    ImageUploadResponse,
+    MCPExecuteRequest,
     MessageOut,
     ModelPullRequest,
-    RecommendationOut,
-    ImageUploadResponse,
-    ObjectDetectRequest,
-    ImageGenerateRequest,
-    ImageEditRequest,
-    VisionAnalyzeRequest,
+    ModelRecommendRequest,
     OCRRequest,
+    ObjectDetectRequest,
+    PlanRequest,
+    RecommendationOut,
+    VisionAnalyzeRequest,
 )
+from orchestration.dag_engine import DAGNode
+from routing.model_router import ModelRouter
+from tools import image_editing, image_generation, object_detection, ocr, rag, vision_analysis
 from cookbook import detect_hardware, recommend_models
-from agent import execute_tools
-from tools import rag, object_detection, image_generation, image_editing, vision_analysis, ocr
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 IMAGE_DIR = Path(os.getenv("IMAGE_DIR", "/tmp/prometheus-images")).resolve()
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Prometheus API", version="0.2.0")
+app = FastAPI(title="Prometheus API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +49,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+agent = get_default_agent(OLLAMA_URL)
+model_router = ModelRouter()
+
+DAG_STATES: Dict[str, Dict[str, Any]] = {}
+DAG_TASKS: Dict[str, asyncio.Task] = {}
+
+
+class WebSocketHub:
+    def __init__(self):
+        self.clients: List[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.clients.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self.clients:
+            self.clients.remove(ws)
+
+    async def broadcast(self, event: Dict[str, Any]):
+        dead: List[WebSocket] = []
+        for ws in self.clients:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                dead.append(ws)
+        for d in dead:
+            self.disconnect(d)
+
+
+ws_hub = WebSocketHub()
+
+
+mcp_server = MCPServer()
+for tool_name, fn in TOOL_MAP.items():
+    mcp_server.register_tool(
+        name=tool_name,
+        schema={"type": "object", "properties": {}},
+        handler=fn,
+    )
 
 
 @app.on_event("startup")
@@ -101,27 +150,24 @@ async def chat(req: ChatRequest):
         if hits:
             context = "\n\nRelevant memory:\n" + "\n---\n".join([h[0] for h in hits])
 
-    # If an image is attached, optionally enrich prompt using vision model.
     image_context = ""
     if req.image_paths:
-        first_image = req.image_paths[0]
         analysis = vision_analysis.analyze(
-            image_path=first_image,
-            prompt=f"Analyze the image for this user question: {req.message}",
+            image_path=req.image_paths[0],
+            prompt=f"Analyze this image for user task: {req.message}",
             model=req.vision_model or "llava",
         )
         if analysis.get("ok"):
-            image_context = f"\n\nImage context from {first_image}:\n{analysis.get('response', '')[:2000]}"
+            image_context = f"\n\nImage context:\n{analysis.get('response', '')[:2500]}"
 
     tool_results = []
     if req.use_tools:
-        tool_results = execute_tools(req.message, req.image_paths)
+        tool_results = agent.execute_tools(req.message, req.image_paths)
         for tr in tool_results:
             _log_tool_call(conversation_id, tr.get("tool", "unknown"), tr.get("input", {}), tr.get("output", {}))
 
-    tool_context = ""
-    if tool_results:
-        tool_context = "\n\nTool outputs:\n" + json.dumps(tool_results, ensure_ascii=False)[:5000]
+    model = req.model or model_router.route_task(req.message)
+    tool_context = "\n\nTool outputs:\n" + json.dumps(tool_results, ensure_ascii=False)[:5000] if tool_results else ""
 
     prompt = f"""You are Prometheus, a local AI workspace assistant.
 User said:
@@ -132,11 +178,11 @@ User said:
 Answer clearly and concisely."""
 
     try:
-        answer = await _ollama_generate(req.model, prompt)
+        answer = await _ollama_generate(model, prompt)
     except Exception as e:
         answer = f"Model call failed: {e}"
 
-    _add_message(conversation_id, "assistant", answer, req.model)
+    _add_message(conversation_id, "assistant", answer, model)
     return ChatResponse(conversation_id=conversation_id, assistant_message=answer)
 
 
@@ -234,10 +280,6 @@ async def upload_document(file: UploadFile = File(...)):
     return {"ok": True, "chunks": len(ids)}
 
 
-# --------------------------
-# Vision / Image Endpoints
-# --------------------------
-
 @app.post("/upload_image", response_model=ImageUploadResponse)
 @app.post("/api/upload_image", response_model=ImageUploadResponse)
 async def upload_image(file: UploadFile = File(...)):
@@ -253,12 +295,7 @@ async def upload_image(file: UploadFile = File(...)):
     with dst.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    return ImageUploadResponse(
-        ok=True,
-        filename=ts_name,
-        image_path=str(dst),
-        image_url=f"/api/images/{ts_name}",
-    )
+    return ImageUploadResponse(ok=True, filename=ts_name, image_path=str(dst), image_url=f"/api/images/{ts_name}")
 
 
 @app.get("/images/{filename}")
@@ -319,3 +356,111 @@ def extract_text(req: OCRRequest):
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error", "ocr failed"))
     return out
+
+
+# --------------------------
+# Orchestration APIs
+# --------------------------
+
+
+@app.post("/api/plan")
+async def plan_task(req: PlanRequest):
+    plan = await agent.create_plan(req.request)
+    return {"ok": True, "plan": plan}
+
+
+@app.get("/api/dag/{task_id}")
+def get_dag_state(task_id: str):
+    if task_id not in DAG_STATES:
+        raise HTTPException(status_code=404, detail="task not found")
+    return DAG_STATES[task_id]
+
+
+@app.post("/api/execute_dag")
+async def execute_dag(req: ExecuteDAGRequest):
+    request = req.request or ""
+
+    if req.plan:
+        nodes = [
+            DAGNode(
+                id=str(x.get("id", f"node_{i+1}")),
+                task={"action": x.get("action", "noop"), "input": x.get("input", {})},
+                dependencies=x.get("dependencies", []),
+                condition=x.get("condition"),
+            )
+            for i, x in enumerate(req.plan)
+        ]
+    else:
+        nodes = await agent.create_dag(request)
+
+    async def on_state_change_async(task_id: str, state: Dict[str, Any]):
+        DAG_STATES[task_id] = state
+        await ws_hub.broadcast({"type": "dag_update", "task_id": task_id, "state": state})
+
+    def on_state_change(task_id: str, state: Dict[str, Any]):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(on_state_change_async(task_id, state))
+        except RuntimeError:
+            pass
+
+    async def _runner():
+        result = await agent.execute_dag(
+            request=request,
+            nodes=nodes,
+            max_parallel=req.max_parallel,
+            on_state_change=on_state_change,
+        )
+        DAG_STATES[result["dag"]["task_id"]] = result
+        await ws_hub.broadcast({"type": "dag_completed", "task_id": result["dag"]["task_id"], "state": result})
+        return result
+
+    task = asyncio.create_task(_runner())
+    DAG_TASKS[str(id(task))] = task
+    result = await task
+    return {"ok": True, "task_id": result["dag"]["task_id"], "result": result}
+
+
+@app.post("/api/models/recommend")
+async def recommend_model(req: ModelRecommendRequest):
+    return {"ok": True, "recommendation": model_router.recommend(req.task, req.available_models)}
+
+
+# --------------------------
+# MCP APIs
+# --------------------------
+
+
+@app.get("/mcp/tools")
+@app.get("/api/mcp/tools")
+def list_mcp_tools():
+    return {"ok": True, "tools": mcp_server.list_tools()}
+
+
+@app.post("/mcp/execute")
+@app.post("/api/mcp/execute")
+def execute_mcp_tool(req: MCPExecuteRequest):
+    try:
+        out = mcp_server.call_tool(req.tool, req.arguments)
+        return {"ok": True, "output": out}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/mcp/rpc")
+@app.post("/api/mcp/rpc")
+def mcp_rpc(payload: Dict[str, Any]):
+    return mcp_server.handle_rpc(payload)
+
+
+@app.websocket("/ws/dag")
+async def ws_dag(websocket: WebSocket):
+    await ws_hub.connect(websocket)
+    try:
+        await websocket.send_json({"type": "connected", "message": "dag websocket connected"})
+        while True:
+            _ = await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_hub.disconnect(websocket)
+    except Exception:
+        ws_hub.disconnect(websocket)
