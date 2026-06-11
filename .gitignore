@@ -5,4 +5,6 @@ frontend/node_modules/
 *.pid
 backend/data/
 backend/workspace/images/*
+backend/workspace/audio/*
 !backend/workspace/images/.gitkeep
+!backend/workspace/audio/.gitkeep

@@ -1,6 +1,8 @@
 <script>
   import { marked } from 'marked';
   import ImageUpload from './ImageUpload.svelte';
+  import VoiceInput from './voice/VoiceInput.svelte';
+  import VoiceControls from './voice/VoiceControls.svelte';
 
   const API = import.meta.env.VITE_API_URL || '/api';
   export let selectedConversation = null;
@@ -11,6 +13,9 @@
   let input = '';
   let uploading = false;
   let attachedImages = [];
+  let ttsEnabled = false;
+  let voiceModel = '';
+  let latestAudioUrl = '';
 
   $: if (selectedConversation) loadMessages();
 
@@ -26,6 +31,19 @@
 
   function removeAttachment(idx) {
     attachedImages = attachedImages.filter((_, i) => i !== idx);
+  }
+
+  async function speak(text) {
+    if (!ttsEnabled || !text?.trim()) return;
+    const res = await fetch(`${API}/voice/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice_model: voiceModel || null })
+    });
+    if (res.ok) {
+      const blob = await res.blob();
+      latestAudioUrl = URL.createObjectURL(blob);
+    }
   }
 
   async function send() {
@@ -76,13 +94,14 @@
           messages = messages;
           if (!selectedConversation && obj.conversation_id) selectedConversation = obj.conversation_id;
         } catch {
-          // no-op
+          // ignore parse errors
         }
       }
     }
 
     attachedImages = [];
     if (selectedConversation) await loadMessages();
+    await speak(acc);
   }
 
   async function onUpload(e) {
@@ -95,19 +114,27 @@
     uploading = false;
   }
 
+  function onTranscribed(event) {
+    const text = event.detail || '';
+    input = input ? `${input} ${text}` : text;
+  }
+
   function render(md) {
     return marked.parse(md || '');
   }
 </script>
 
-<section class="chat">
+<section class="chat panel">
   <div class="toolbar">
     <label class="upload">
       Upload doc for RAG
       <input type="file" on:change={onUpload} />
     </label>
+    <VoiceInput on:transcribed={onTranscribed} />
     {#if uploading}<span>Uploading...</span>{/if}
   </div>
+
+  <VoiceControls bind:ttsEnabled bind:voiceModel />
 
   <ImageUpload on:uploaded={onImageUploaded} />
   {#if attachedImages.length}
@@ -122,6 +149,10 @@
     </div>
   {/if}
 
+  {#if latestAudioUrl}
+    <audio controls src={latestAudioUrl}></audio>
+  {/if}
+
   <div class="messages">
     {#each messages as m}
       <article class={m.role}>
@@ -133,7 +164,7 @@
   </div>
 
   <div class="composer">
-    <textarea bind:value={input} rows="3" placeholder="Ask anything. You can attach images above."></textarea>
+    <textarea bind:value={input} rows="3" placeholder="Ask anything. You can attach images or use voice."></textarea>
     <button on:click={send}>Send</button>
   </div>
 </section>
@@ -141,19 +172,18 @@
 <style>
   .chat { display:flex; flex-direction:column; gap:12px; height:calc(100vh - 130px); }
   .toolbar { display:flex; align-items:center; gap:10px; }
-  .upload { background:#1e293b; padding:8px 12px; border-radius:8px; cursor:pointer; }
+  .upload { background:var(--bg-tertiary); padding:8px 12px; border-radius:8px; cursor:pointer; border:1px solid var(--border); }
   .upload input { display:none; }
   .attachments { display:flex; gap:8px; flex-wrap:wrap; }
-  .chip { display:flex; align-items:center; gap:6px; background:#111827; border:1px solid #334155; border-radius:8px; padding:4px 6px; }
+  .chip { display:flex; align-items:center; gap:6px; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:4px 6px; }
   .chip img { width:28px; height:28px; object-fit:cover; border-radius:4px; }
-  .chip button { background:#7f1d1d; color:#fff; border:none; border-radius:6px; cursor:pointer; }
-  .messages { flex:1; overflow:auto; background:#020617; border:1px solid #1f2937; border-radius:10px; padding:12px; }
+  .chip button { background:var(--error); color:#fff; border:none; border-radius:6px; cursor:pointer; }
+  .messages { flex:1; overflow:auto; background:#020617; border:1px solid var(--border); border-radius:10px; padding:12px; }
   article { display:flex; margin-bottom:10px; }
   article.user { justify-content:flex-end; }
-  :global(.bubble img) { max-width:240px; border-radius:8px; border:1px solid #334155; }
-  .bubble { max-width:80%; padding:10px; border-radius:12px; background:#1e293b; }
-  article.user .bubble { background:#0ea5e9; color:#001018; }
+  :global(.bubble img) { max-width:240px; border-radius:8px; border:1px solid var(--border); }
+  .bubble { max-width:80%; padding:10px; border-radius:12px; background:var(--bg-tertiary); }
+  article.user .bubble { background:var(--secondary); color:white; }
   .composer { display:flex; gap:10px; }
-  textarea { flex:1; background:#111827; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:10px; }
-  button { background:#22c55e; color:#052e16; border:none; border-radius:8px; padding:0 16px; font-weight:600; }
+  textarea { flex:1; }
 </style>

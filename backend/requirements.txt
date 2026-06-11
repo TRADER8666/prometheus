@@ -20,3 +20,10 @@ icalendar
 pyperclip
 networkx
 websockets
+APScheduler
+croniter
+openai-whisper
+piper-tts
+webrtcvad
+soundfile
+numpy

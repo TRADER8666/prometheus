@@ -2,19 +2,23 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from agent import TOOL_MAP, get_default_agent
+from cookbook import detect_hardware, recommend_models
 from database import db_cursor, init_db, now_iso
 from mcp.mcp_server import MCPServer
 from models import (
+    BookmarkCreateRequest,
+    BookmarkUpdateRequest,
     ChatRequest,
     ChatResponse,
     ConversationOut,
@@ -22,26 +26,42 @@ from models import (
     ImageEditRequest,
     ImageGenerateRequest,
     ImageUploadResponse,
+    KanbanBoardCreateRequest,
+    KanbanBoardUpdateRequest,
+    KanbanCardCreateRequest,
+    KanbanCardUpdateRequest,
+    KanbanColumnCreateRequest,
+    KanbanColumnUpdateRequest,
     MCPExecuteRequest,
     MessageOut,
     ModelPullRequest,
     ModelRecommendRequest,
+    MoveCardRequest,
+    NoteCreateRequest,
+    NoteUpdateRequest,
     OCRRequest,
     ObjectDetectRequest,
     PlanRequest,
     RecommendationOut,
+    SchedulerJobCreateRequest,
+    SchedulerJobUpdateRequest,
     VisionAnalyzeRequest,
+    VoiceSpeakRequest,
 )
 from orchestration.dag_engine import DAGNode
+from productivity import BookmarksService, KanbanService, NotesService
 from routing.model_router import ModelRouter
+from scheduler import TaskScheduler, register_default_actions
 from tools import image_editing, image_generation, object_detection, ocr, rag, vision_analysis
-from cookbook import detect_hardware, recommend_models
+from voice import SpeechToTextService, TextToSpeechService, VoiceIntegrationService
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 IMAGE_DIR = Path(os.getenv("IMAGE_DIR", "/tmp/prometheus-images")).resolve()
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_DIR = Path(os.getenv("AUDIO_DIR", "/tmp/prometheus-audio")).resolve()
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Prometheus API", version="0.3.0")
+app = FastAPI(title="Prometheus API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +72,15 @@ app.add_middleware(
 
 agent = get_default_agent(OLLAMA_URL)
 model_router = ModelRouter()
+notes_service = NotesService()
+kanban_service = KanbanService()
+bookmarks_service = BookmarksService()
+voice_stt = SpeechToTextService()
+voice_tts = TextToSpeechService(output_dir=str(AUDIO_DIR))
+voice_integration = VoiceIntegrationService()
+
+scheduler_service = TaskScheduler()
+register_default_actions(scheduler_service)
 
 DAG_STATES: Dict[str, Dict[str, Any]] = {}
 DAG_TASKS: Dict[str, asyncio.Task] = {}
@@ -82,7 +111,6 @@ class WebSocketHub:
 
 ws_hub = WebSocketHub()
 
-
 mcp_server = MCPServer()
 for tool_name, fn in TOOL_MAP.items():
     mcp_server.register_tool(
@@ -95,6 +123,12 @@ for tool_name, fn in TOOL_MAP.items():
 @app.on_event("startup")
 def startup():
     init_db()
+    scheduler_service.start()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    scheduler_service.shutdown()
 
 
 def _create_conversation(title: str) -> int:
@@ -280,6 +314,7 @@ async def upload_document(file: UploadFile = File(...)):
     return {"ok": True, "chunks": len(ids)}
 
 
+# Vision / Image Endpoints
 @app.post("/upload_image", response_model=ImageUploadResponse)
 @app.post("/api/upload_image", response_model=ImageUploadResponse)
 async def upload_image(file: UploadFile = File(...)):
@@ -358,11 +393,7 @@ def extract_text(req: OCRRequest):
     return out
 
 
-# --------------------------
 # Orchestration APIs
-# --------------------------
-
-
 @app.post("/api/plan")
 async def plan_task(req: PlanRequest):
     plan = await agent.create_plan(req.request)
@@ -426,11 +457,7 @@ async def recommend_model(req: ModelRecommendRequest):
     return {"ok": True, "recommendation": model_router.recommend(req.task, req.available_models)}
 
 
-# --------------------------
 # MCP APIs
-# --------------------------
-
-
 @app.get("/mcp/tools")
 @app.get("/api/mcp/tools")
 def list_mcp_tools():
@@ -453,6 +480,255 @@ def mcp_rpc(payload: Dict[str, Any]):
     return mcp_server.handle_rpc(payload)
 
 
+# Productivity endpoints: Notes
+@app.get("/api/notes")
+def list_notes(q: str = "", tag: str = ""):
+    return {"ok": True, "notes": notes_service.list_notes(query=q, tag=tag)}
+
+
+@app.post("/api/notes")
+def create_note(req: NoteCreateRequest):
+    return {"ok": True, "note": notes_service.create_note(req.title, req.content, req.tags)}
+
+
+@app.get("/api/notes/{note_id}")
+def get_note(note_id: int):
+    note = notes_service.get_note(note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"ok": True, "note": note}
+
+
+@app.put("/api/notes/{note_id}")
+def update_note(note_id: int, req: NoteUpdateRequest):
+    note = notes_service.update_note(note_id, req.model_dump(exclude_none=True))
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"ok": True, "note": note}
+
+
+@app.delete("/api/notes/{note_id}")
+def delete_note(note_id: int):
+    if not notes_service.delete_note(note_id):
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"ok": True}
+
+
+@app.post("/api/notes/{note_id}/export")
+def export_note(note_id: int):
+    path = notes_service.export_note_markdown(note_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"ok": True, "path": path}
+
+
+# Productivity endpoints: Kanban
+@app.get("/api/kanban/boards")
+def list_kanban_boards():
+    return {"ok": True, "boards": kanban_service.list_boards()}
+
+
+@app.post("/api/kanban/boards")
+def create_kanban_board(req: KanbanBoardCreateRequest):
+    return {"ok": True, "board": kanban_service.create_board(req.name, req.description)}
+
+
+@app.put("/api/kanban/boards/{board_id}")
+def update_kanban_board(board_id: int, req: KanbanBoardUpdateRequest):
+    board = kanban_service.update_board(board_id, req.model_dump(exclude_none=True))
+    if not board:
+        raise HTTPException(status_code=404, detail="board not found")
+    return {"ok": True, "board": board}
+
+
+@app.delete("/api/kanban/boards/{board_id}")
+def delete_kanban_board(board_id: int):
+    if not kanban_service.delete_board(board_id):
+        raise HTTPException(status_code=404, detail="board not found")
+    return {"ok": True}
+
+
+@app.get("/api/kanban/columns")
+def list_kanban_columns(board_id: int):
+    return {"ok": True, "columns": kanban_service.list_columns(board_id)}
+
+
+@app.post("/api/kanban/columns")
+def create_kanban_column(req: KanbanColumnCreateRequest):
+    return {"ok": True, "column": kanban_service.create_column(req.board_id, req.name)}
+
+
+@app.put("/api/kanban/columns/{column_id}")
+def update_kanban_column(column_id: int, req: KanbanColumnUpdateRequest):
+    column = kanban_service.update_column(column_id, req.model_dump(exclude_none=True))
+    if not column:
+        raise HTTPException(status_code=404, detail="column not found")
+    return {"ok": True, "column": column}
+
+
+@app.delete("/api/kanban/columns/{column_id}")
+def delete_kanban_column(column_id: int):
+    if not kanban_service.delete_column(column_id):
+        raise HTTPException(status_code=404, detail="column not found")
+    return {"ok": True}
+
+
+@app.get("/api/kanban/cards")
+def list_kanban_cards(column_id: Optional[int] = Query(default=None)):
+    return {"ok": True, "cards": kanban_service.list_cards(column_id)}
+
+
+@app.post("/api/kanban/cards")
+def create_kanban_card(req: KanbanCardCreateRequest):
+    card = kanban_service.create_card(
+        column_id=req.column_id,
+        title=req.title,
+        description=req.description,
+        assignee=req.assignee,
+        due_date=req.due_date,
+        labels=req.labels,
+        checklist=req.checklist,
+    )
+    return {"ok": True, "card": card}
+
+
+@app.put("/api/kanban/cards/{card_id}")
+def update_kanban_card(card_id: int, req: KanbanCardUpdateRequest):
+    card = kanban_service.update_card(card_id, req.model_dump(exclude_none=True))
+    if not card:
+        raise HTTPException(status_code=404, detail="card not found")
+    return {"ok": True, "card": card}
+
+
+@app.delete("/api/kanban/cards/{card_id}")
+def delete_kanban_card(card_id: int):
+    if not kanban_service.delete_card(card_id):
+        raise HTTPException(status_code=404, detail="card not found")
+    return {"ok": True}
+
+
+@app.post("/api/kanban/cards/{card_id}/move")
+def move_kanban_card(card_id: int, req: MoveCardRequest):
+    card = kanban_service.move_card(card_id, req.target_column_id, req.position)
+    if not card:
+        raise HTTPException(status_code=404, detail="card not found")
+    return {"ok": True, "card": card}
+
+
+# Productivity endpoints: Bookmarks
+@app.get("/api/bookmarks")
+def list_bookmarks(q: str = "", tag: str = "", folder: str = ""):
+    return {"ok": True, "bookmarks": bookmarks_service.list_bookmarks(query=q, tag=tag, folder=folder)}
+
+
+@app.post("/api/bookmarks")
+def create_bookmark(req: BookmarkCreateRequest):
+    return {
+        "ok": True,
+        "bookmark": bookmarks_service.create_bookmark(req.url, req.title, req.description, req.tags, req.folder, req.favicon),
+    }
+
+
+@app.put("/api/bookmarks/{bookmark_id}")
+def update_bookmark(bookmark_id: int, req: BookmarkUpdateRequest):
+    bm = bookmarks_service.update_bookmark(bookmark_id, req.model_dump(exclude_none=True))
+    if not bm:
+        raise HTTPException(status_code=404, detail="bookmark not found")
+    return {"ok": True, "bookmark": bm}
+
+
+@app.delete("/api/bookmarks/{bookmark_id}")
+def delete_bookmark(bookmark_id: int):
+    if not bookmarks_service.delete_bookmark(bookmark_id):
+        raise HTTPException(status_code=404, detail="bookmark not found")
+    return {"ok": True}
+
+
+@app.post("/api/bookmarks/auto-save")
+def auto_save_bookmark(req: BookmarkCreateRequest):
+    return {
+        "ok": True,
+        "bookmark": bookmarks_service.create_bookmark(req.url, req.title, req.description, req.tags, req.folder, req.favicon),
+        "source": "browser",
+    }
+
+
+@app.get("/api/bookmarks/export")
+def export_bookmarks():
+    return {"ok": True, **bookmarks_service.export_bookmarks()}
+
+
+@app.post("/api/bookmarks/import")
+async def import_bookmarks(file: UploadFile = File(...)):
+    data = await file.read()
+    payload = json.loads(data.decode("utf-8"))
+    return bookmarks_service.import_bookmarks(payload)
+
+
+# Scheduler endpoints
+@app.get("/api/scheduler/jobs")
+def list_scheduler_jobs():
+    return {"ok": True, "jobs": scheduler_service.list_jobs()}
+
+
+@app.post("/api/scheduler/jobs")
+def create_scheduler_job(req: SchedulerJobCreateRequest):
+    try:
+        job = scheduler_service.create_job(
+            name=req.name,
+            schedule=req.schedule,
+            action=req.action,
+            action_payload=req.action_payload,
+            enabled=req.enabled,
+        )
+        return {"ok": True, "job": job}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/scheduler/jobs/{job_id}")
+def update_scheduler_job(job_id: int, req: SchedulerJobUpdateRequest):
+    try:
+        job = scheduler_service.update_job(job_id, req.model_dump(exclude_none=True))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True, "job": job}
+
+
+@app.delete("/api/scheduler/jobs/{job_id}")
+def delete_scheduler_job(job_id: int):
+    if not scheduler_service.delete_job(job_id):
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True}
+
+
+@app.get("/api/scheduler/history")
+def scheduler_history(limit: int = 100):
+    return {"ok": True, "history": scheduler_service.history(limit=limit)}
+
+
+# Voice endpoints
+@app.post("/api/voice/transcribe")
+async def voice_transcribe(file: UploadFile = File(...), model_size: str = "small", language: Optional[str] = None):
+    data = await file.read()
+    suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+    out = voice_stt.transcribe_bytes(data, suffix=suffix, model_size=model_size, language=language)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "transcription failed"))
+    return out
+
+
+@app.post("/api/voice/speak")
+def voice_speak(req: VoiceSpeakRequest):
+    out = voice_tts.speak(req.text, req.voice_model)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "tts failed"))
+    audio_path = out.get("audio_path")
+    return FileResponse(audio_path, media_type="audio/wav", filename=Path(audio_path).name)
+
+
 @app.websocket("/ws/dag")
 async def ws_dag(websocket: WebSocket):
     await ws_hub.connect(websocket)
@@ -464,3 +740,18 @@ async def ws_dag(websocket: WebSocket):
         ws_hub.disconnect(websocket)
     except Exception:
         ws_hub.disconnect(websocket)
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_json({"type": "connected", "message": "voice websocket connected"})
+    try:
+        while True:
+            data = await websocket.receive_json()
+            result = voice_integration.process_webrtc_payload(data)
+            await websocket.send_json({"type": "voice_result", "result": result})
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        await websocket.send_json({"type": "error", "error": str(e)})

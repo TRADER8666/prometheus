@@ -107,3 +107,105 @@ class MCPExecuteRequest(BaseModel):
 class ModelRecommendRequest(BaseModel):
     task: str
     available_models: List[str] = Field(default_factory=list)
+
+
+# Productivity
+class NoteCreateRequest(BaseModel):
+    title: str
+    content: str = ""
+    tags: List[str] = Field(default_factory=list)
+
+
+class NoteUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class KanbanBoardCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+class KanbanBoardUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    position: Optional[int] = None
+
+
+class KanbanColumnCreateRequest(BaseModel):
+    board_id: int
+    name: str
+
+
+class KanbanColumnUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    position: Optional[int] = None
+
+
+class KanbanCardCreateRequest(BaseModel):
+    column_id: int
+    title: str
+    description: str = ""
+    assignee: str = ""
+    due_date: str = ""
+    labels: List[str] = Field(default_factory=list)
+    checklist: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class KanbanCardUpdateRequest(BaseModel):
+    column_id: Optional[int] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    assignee: Optional[str] = None
+    due_date: Optional[str] = None
+    labels: Optional[List[str]] = None
+    checklist: Optional[List[Dict[str, Any]]] = None
+    position: Optional[int] = None
+
+
+class MoveCardRequest(BaseModel):
+    target_column_id: int
+    position: int
+
+
+class BookmarkCreateRequest(BaseModel):
+    url: str
+    title: str = ""
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    folder: str = ""
+    favicon: str = ""
+
+
+class BookmarkUpdateRequest(BaseModel):
+    url: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    folder: Optional[str] = None
+    favicon: Optional[str] = None
+
+
+# Scheduler
+class SchedulerJobCreateRequest(BaseModel):
+    name: str
+    schedule: str
+    action: str
+    action_payload: Dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class SchedulerJobUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    schedule: Optional[str] = None
+    action: Optional[str] = None
+    action_payload: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+
+
+# Voice
+class VoiceSpeakRequest(BaseModel):
+    text: str
+    voice_model: Optional[str] = None
+

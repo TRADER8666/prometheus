@@ -20,8 +20,9 @@ install_base_packages() {
   $SUDO apt-get update
   $SUDO apt-get install -y \
     ca-certificates curl gnupg lsb-release software-properties-common \
-    apt-transport-https net-tools ufw git jq rsync \
-    python3 python3-pip python3-venv libgl1 libglib2.0-0
+    apt-transport-https net-tools ufw git jq rsync unzip \
+    python3 python3-pip python3-venv ffmpeg \
+    libgl1 libglib2.0-0 libsndfile1 portaudio19-dev
 }
 
 install_docker() {
@@ -62,24 +63,26 @@ setup_nvidia_or_amd() {
 }
 
 install_python_ai_deps() {
-  log "Installing Python AI dependencies (torch/diffusers/ultralytics/easyocr)..."
+  log "Installing Python AI dependencies..."
+  python3 -m pip install --upgrade pip || true
 
   if command -v nvidia-smi >/dev/null 2>&1; then
-    log "Attempting CUDA PyTorch install..."
-    python3 -m pip install --upgrade pip || true
-    python3 -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121 || \
-      python3 -m pip install torch torchvision
+    python3 -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121 || true
   else
-    log "Installing CPU PyTorch wheels..."
-    python3 -m pip install --upgrade pip || true
-    python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || \
-      python3 -m pip install torch torchvision
+    python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || true
   fi
 
-  python3 -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
+  python3 -m pip install -r "$PROJECT_DIR/backend/requirements.txt" || true
 
   log "Installing Playwright Chromium browser..."
   python3 -m playwright install chromium || true
+
+  log "Preloading Whisper small model..."
+  python3 - << 'PY'
+import whisper
+whisper.load_model('small')
+print('Whisper small ready')
+PY
 
   log "Downloading/caching YOLO model weights (yolov8n.pt)..."
   python3 - << 'PY'
@@ -87,6 +90,19 @@ from ultralytics import YOLO
 YOLO('yolov8n.pt')
 print('YOLO weights ready')
 PY
+}
+
+install_piper_voice() {
+  log "Installing piper-tts assets..."
+  $SUDO mkdir -p /opt/prometheus/voices
+  if [ ! -f /opt/prometheus/voices/en_US-lessac-medium.onnx ]; then
+    curl -L -o /tmp/en_US-lessac-medium.onnx \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx || true
+    curl -L -o /tmp/en_US-lessac-medium.onnx.json \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json || true
+    $SUDO mv /tmp/en_US-lessac-medium.onnx /opt/prometheus/voices/en_US-lessac-medium.onnx 2>/dev/null || true
+    $SUDO mv /tmp/en_US-lessac-medium.onnx.json /opt/prometheus/voices/en_US-lessac-medium.onnx.json 2>/dev/null || true
+  fi
 }
 
 install_ollama_native() {
@@ -117,6 +133,7 @@ install_ollama_native() {
 prepare_app_dirs() {
   mkdir -p "$PROJECT_DIR"/{data,workspace,chroma_data,searxng}
   mkdir -p "$PROJECT_DIR/backend/workspace/images"
+  mkdir -p "$PROJECT_DIR/backend/workspace/audio"
 }
 
 install_systemd_service() {
@@ -164,6 +181,7 @@ main() {
   install_docker
   setup_nvidia_or_amd
   install_python_ai_deps
+  install_piper_voice
   install_ollama_native
   prepare_app_dirs
   install_systemd_service

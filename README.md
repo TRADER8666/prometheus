@@ -1,73 +1,126 @@
-# Prometheus AI Workspace
+# Prometheus v1.0 — Local AI Workspace
 
-Prometheus is a locally-hostable AI workspace with:
-- local LLM chat via Ollama
-- RAG memory via ChromaDB
-- vision tools (detect/generate/edit/OCR/analyze)
-- **advanced orchestration** (DAG planning + execution + swarm + model routing + MCP)
-
----
-
-## Core Capabilities
-
-### 1) Chat + Tool Use
-- chat endpoint with tool-invocation syntax
-- code/file/search/rag tools
-- productivity tools: git/browser/email/calendar/utilities
-
-### 2) Vision
-- YOLO object detection
-- Stable Diffusion image generation
-- Stable Diffusion inpainting
-- Ollama vision analysis (`llava`)
-- OCR (`easyocr`)
-
-### 3) Orchestration Intelligence Layer
-- DAG engine with:
-  - topological execution
-  - node states: `PENDING -> IN_PROGRESS -> COMPLETED/FAILED/SKIPPED`
-  - retry with exponential backoff
-  - parallel execution of independent nodes
-  - conditional branch support
-- Swarm coordinator with master/worker model and AMP (Agent Message Protocol)
-- Planner that decomposes natural language into DAG steps
-- Multi-model router for coding/general/reasoning/vision tasks
-- MCP server/client support
-- Real-time DAG updates via WebSocket
+Prometheus is a complete, locally-hostable AI workspace that combines:
+- conversational AI + tool use
+- visual AI
+- orchestration (DAG + swarm)
+- productivity suite (notes, kanban, bookmarks)
+- scheduler automation
+- voice I/O (Whisper STT + Piper TTS)
 
 ---
 
-## Architecture
+## Complete Feature List
 
-- Frontend (Svelte + Vite): `3000`
-- Backend (FastAPI): `8000`
-- Ollama (host-native): `11434`
-- ChromaDB: `8001`
-- SearXNG: `8080`
-- Nginx reverse proxy: `80`
+### AI Core
+- Local chat via Ollama
+- Tool-augmented responses (code/file/search/rag)
+- Multi-model router (coding / vision / reasoning / general)
+- RAG memory with ChromaDB
 
-Nginx routing:
-- `/` -> frontend
-- `/api/*` -> backend
+### Vision
+- Object detection (YOLO)
+- Image generation (Stable Diffusion)
+- Image editing / inpainting
+- Vision analysis via Ollama vision models (e.g., llava)
+- OCR text extraction
+
+### Orchestration
+- LLM-assisted task planning to DAG
+- Parallel DAG execution with retries/backoff
+- Swarm coordinator (master/worker)
+- Real-time DAG updates via WebSocket (`/ws/dag`)
+- MCP-compatible tool listing/execution APIs
+
+### Productivity Suite
+- **Notes**: markdown editor, tags, full-text search, export to `.md`
+- **Kanban**: boards/columns/cards, drag-and-drop ordering, move across columns
+- **Bookmarks**: folders/tags, search, import/export JSON, browser auto-save endpoint
+
+### Scheduler
+- APScheduler-based cron jobs
+- Natural-language schedule shortcuts (e.g., "every morning at 8 AM")
+- Job history/logs
+- Built-in actions:
+  - email summary (placeholder local mode)
+  - daily briefing
+  - backup data
+  - system health check
+  - custom agent task
+
+### Voice & Audio
+- Whisper speech-to-text (`/api/voice/transcribe`)
+- Piper text-to-speech (`/api/voice/speak`)
+- Voice command integration (`/ws/voice`)
 
 ---
 
-## API Endpoints
+## Architecture Diagram
 
-### Chat + Core
+```text
+Browser (Svelte UI)
+  ├─ Chat / Vision / Orchestration / Productivity / Scheduler / Voice
+  └─ WebSockets (DAG + Voice)
+
+Nginx :80
+  ├─ /          -> Frontend :3000
+  └─ /api/*     -> FastAPI :8000
+
+FastAPI Backend
+  ├─ Agent + Tool Runtime
+  ├─ Orchestration Engine (planner + DAG + swarm + routing)
+  ├─ Productivity Services (notes/kanban/bookmarks)
+  ├─ Scheduler Service (APScheduler + croniter)
+  ├─ Voice Services (Whisper + Piper)
+  └─ SQLite (WAL)
+
+External/Side Services
+  ├─ Ollama :11434
+  ├─ ChromaDB :8001
+  └─ SearXNG :8080
+```
+
+---
+
+## Installation (One Command)
+
+```bash
+git clone https://github.com/TRADER8666/prometheus.git
+cd prometheus
+chmod +x install.sh
+./install.sh
+```
+
+Installer provisions:
+- Docker + Compose
+- host-native Ollama + model pulls (`llama3.2:3b`, `qwen2.5-coder:1.5b`, `nomic-embed-text`, `llava`)
+- ffmpeg + audio dependencies
+- AI Python dependencies (vision/orchestration/voice)
+- Playwright Chromium
+- Whisper model preload (`small`)
+- Piper voice asset download
+- systemd + LAN setup
+
+---
+
+## User Guide
+
+### Sections
+- **Chat**: ask questions, attach images, voice dictation, optional TTS playback
+- **Orchestration**: generate editable execution plan, run DAG, monitor progress live
+- **Vision**: detect/generate/edit/OCR/analyze images
+- **Notes**: create/search/tag/export markdown notes
+- **Kanban**: manage tasks visually and reorder via drag-and-drop
+- **Bookmarks**: organize URLs by folders/tags
+- **Scheduler**: create recurring automation jobs and inspect run history
+
+---
+
+## API Documentation (Key Endpoints)
+
+### Core Chat
 - `POST /api/chat`
 - `POST /api/chat/stream`
-- `GET /api/conversations`
-- `POST /api/conversations`
-- `DELETE /api/conversations/{id}`
-- `GET /api/conversations/{id}/messages`
-
-### Model / Cookbook
-- `GET /api/models`
-- `POST /api/models/pull`
-- `DELETE /api/models/{model}`
-- `GET /api/cookbook/recommendations`
-- `POST /api/models/recommend`
 
 ### Vision
 - `POST /api/upload_image`
@@ -78,85 +131,50 @@ Nginx routing:
 - `POST /api/analyze_image`
 - `POST /api/extract_text`
 
-### Orchestration / DAG
+### Orchestration
 - `POST /api/plan`
 - `POST /api/execute_dag`
 - `GET /api/dag/{task_id}`
-- `WS /ws/dag` (real-time DAG state updates)
+- `WS /ws/dag`
 
 ### MCP
 - `GET /api/mcp/tools`
 - `POST /api/mcp/execute`
 - `POST /api/mcp/rpc`
 
----
+### Notes
+- `GET /api/notes`
+- `POST /api/notes`
+- `GET /api/notes/{id}`
+- `PUT /api/notes/{id}`
+- `DELETE /api/notes/{id}`
+- `POST /api/notes/{id}/export`
 
-## Project Structure
+### Kanban
+- `GET/POST /api/kanban/boards`
+- `PUT/DELETE /api/kanban/boards/{id}`
+- `GET/POST /api/kanban/columns`
+- `PUT/DELETE /api/kanban/columns/{id}`
+- `GET/POST /api/kanban/cards`
+- `PUT/DELETE /api/kanban/cards/{id}`
+- `POST /api/kanban/cards/{id}/move`
 
-```text
-prometheus/
-├── backend/
-│   ├── orchestration/
-│   │   ├── dag_engine.py
-│   │   ├── swarm_coordinator.py
-│   │   └── planner.py
-│   ├── routing/
-│   │   └── model_router.py
-│   ├── mcp/
-│   │   ├── mcp_client.py
-│   │   ├── mcp_server.py
-│   │   └── mcp_protocol.py
-│   ├── tools/
-│   │   ├── git_tool.py
-│   │   ├── browser_tool.py
-│   │   ├── email_tool.py
-│   │   ├── calendar_tool.py
-│   │   ├── utility_tools.py
-│   │   └── ...existing tools
-│   ├── agent.py
-│   ├── main.py
-│   └── requirements.txt
-├── frontend/src/components/
-│   ├── DAGVisualizer.svelte
-│   ├── PlanPanel.svelte
-│   ├── TaskMonitor.svelte
-│   └── ...existing components
-└── install.sh
-```
+### Bookmarks
+- `GET/POST /api/bookmarks`
+- `PUT/DELETE /api/bookmarks/{id}`
+- `POST /api/bookmarks/auto-save`
+- `GET /api/bookmarks/export`
+- `POST /api/bookmarks/import`
 
----
+### Scheduler
+- `GET/POST /api/scheduler/jobs`
+- `PUT/DELETE /api/scheduler/jobs/{id}`
+- `GET /api/scheduler/history`
 
-## Install
-
-```bash
-git clone https://github.com/TRADER8666/prometheus.git
-cd prometheus
-chmod +x install.sh
-./install.sh
-```
-
-Installer includes:
-- Docker + Compose
-- host-native Ollama + model pulls (`llama3.2:3b`, `qwen2.5-coder:1.5b`, `nomic-embed-text`, `llava`)
-- Python AI/tool dependencies
-- Playwright Chromium install (`playwright install chromium`)
-- YOLO weight caching
-- service + LAN setup
-
----
-
-## Frontend UX
-
-Tabs in UI:
-- Chat
-- Vision / Images
-- **Orchestration** (plan generation, DAG visualization, task monitoring)
-
-DAG colors:
-- pending: gray
-- in_progress: blue
-- completed: green
-- failed: red
+### Voice
+- `POST /api/voice/transcribe`
+- `POST /api/voice/speak`
+- `WS /ws/voice`
 
 ---
 
@@ -180,8 +198,46 @@ npm run dev
 
 ---
 
-## Notes
+## Troubleshooting
 
-- Heavy models may require high VRAM; CPU fallback is supported but slower.
-- Playwright/browser and diffusion features require additional runtime packages and memory.
-- Add authentication/TLS before exposing beyond LAN.
+### Ollama not reachable
+```bash
+curl http://127.0.0.1:11434/api/tags
+systemctl status ollama
+```
+
+### Whisper fails
+- ensure `ffmpeg` is installed
+- verify audio format (wav/webm/mp3)
+
+### Piper TTS fails
+- ensure `piper` binary is installed and in PATH
+- verify voice file path (default: `/opt/prometheus/voices/en_US-lessac-medium.onnx`)
+
+### Scheduler jobs not running
+- check `GET /api/scheduler/jobs`
+- check `GET /api/scheduler/history`
+- verify cron syntax
+
+### Kanban drag-and-drop issues
+- check frontend dependencies installed (`svelte-dnd-action`)
+
+---
+
+## UI/UX Notes
+
+- Unified dark theme via `frontend/src/styles/theme.css`
+- Responsive section layouts for mobile/tablet
+- Loading/error states across major panels
+- Navigation includes breadcrumbs + icon-based section menu
+
+---
+
+## Security
+
+Prometheus is optimized for local/LAN use by default.
+Before exposing publicly, add:
+- authentication + authorization
+- TLS
+- rate limiting + security headers
+- stricter CORS and network controls
