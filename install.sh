@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODELS=("llama3.2:3b" "qwen2.5-coder:1.5b" "nomic-embed-text")
+MODELS=("llama3.2:3b" "qwen2.5-coder:1.5b" "nomic-embed-text" "llava")
 
 log() { echo "[prometheus-install] $*"; }
 need_sudo() { if [[ $EUID -ne 0 ]]; then echo "sudo"; fi; }
@@ -20,7 +20,8 @@ install_base_packages() {
   $SUDO apt-get update
   $SUDO apt-get install -y \
     ca-certificates curl gnupg lsb-release software-properties-common \
-    apt-transport-https net-tools ufw git jq
+    apt-transport-https net-tools ufw git jq rsync \
+    python3 python3-pip python3-venv libgl1 libglib2.0-0
 }
 
 install_docker() {
@@ -47,7 +48,6 @@ install_docker() {
 }
 
 setup_nvidia_or_amd() {
-  # Priority: NVIDIA over AMD
   if lspci | grep -Eiq 'NVIDIA'; then
     log "NVIDIA GPU detected. Installing NVIDIA driver + CUDA toolkit."
     $SUDO apt-get install -y ubuntu-drivers-common
@@ -59,6 +59,31 @@ setup_nvidia_or_amd() {
   else
     log "No dedicated NVIDIA/AMD GPU detected. CPU mode will be used."
   fi
+}
+
+install_python_ai_deps() {
+  log "Installing Python AI dependencies (torch/diffusers/ultralytics/easyocr)..."
+
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    log "Attempting CUDA PyTorch install..."
+    python3 -m pip install --upgrade pip || true
+    python3 -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121 || \
+      python3 -m pip install torch torchvision
+  else
+    log "Installing CPU PyTorch wheels..."
+    python3 -m pip install --upgrade pip || true
+    python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || \
+      python3 -m pip install torch torchvision
+  fi
+
+  python3 -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
+
+  log "Downloading/caching YOLO model weights (yolov8n.pt)..."
+  python3 - << 'PY'
+from ultralytics import YOLO
+YOLO('yolov8n.pt')
+print('YOLO weights ready')
+PY
 }
 
 install_ollama_native() {
@@ -73,7 +98,7 @@ install_ollama_native() {
   $SUDO systemctl restart ollama || true
 
   log "Waiting for Ollama API..."
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 45); do
     if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then
       break
     fi
@@ -88,6 +113,7 @@ install_ollama_native() {
 
 prepare_app_dirs() {
   mkdir -p "$PROJECT_DIR"/{data,workspace,chroma_data,searxng}
+  mkdir -p "$PROJECT_DIR/backend/workspace/images"
 }
 
 install_systemd_service() {
@@ -101,14 +127,12 @@ install_systemd_service() {
 
 configure_lan() {
   log "Configuring LAN accessibility and firewall..."
-  # open ports for LAN use
   $SUDO ufw allow 80/tcp || true
   $SUDO ufw allow 3000/tcp || true
   $SUDO ufw allow 8000/tcp || true
   $SUDO ufw allow 8080/tcp || true
   $SUDO ufw allow 11434/tcp || true
 
-  # ensure Ollama listens on all interfaces
   $SUDO mkdir -p /etc/systemd/system/ollama.service.d
   cat << EOC | $SUDO tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null
 [Service]
@@ -136,6 +160,7 @@ main() {
   install_base_packages
   install_docker
   setup_nvidia_or_amd
+  install_python_ai_deps
   install_ollama_native
   prepare_app_dirs
   install_systemd_service

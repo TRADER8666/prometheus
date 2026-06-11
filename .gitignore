@@ -1,2 +1,8 @@
 node_modules/
 frontend/node_modules/
+.abacus.donotdelete
+*.log
+*.pid
+backend/data/
+backend/workspace/images/*
+!backend/workspace/images/.gitkeep

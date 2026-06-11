@@ -5,3 +5,12 @@ pydantic==2.9.2
 python-multipart==0.0.9
 chromadb==0.5.5
 psutil==6.0.0
+ultralytics
+torch
+torchvision
+diffusers
+transformers
+accelerate
+easyocr
+Pillow
+opencv-python

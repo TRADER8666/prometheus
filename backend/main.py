@@ -1,11 +1,14 @@
 import json
 import os
+import shutil
+import time
+from pathlib import Path
 from typing import List
 
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from database import db_cursor, init_db, now_iso
 from models import (
@@ -15,14 +18,22 @@ from models import (
     MessageOut,
     ModelPullRequest,
     RecommendationOut,
+    ImageUploadResponse,
+    ObjectDetectRequest,
+    ImageGenerateRequest,
+    ImageEditRequest,
+    VisionAnalyzeRequest,
+    OCRRequest,
 )
 from cookbook import detect_hardware, recommend_models
 from agent import execute_tools
-from tools import rag
+from tools import rag, object_detection, image_generation, image_editing, vision_analysis, ocr
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+IMAGE_DIR = Path(os.getenv("IMAGE_DIR", "/tmp/prometheus-images")).resolve()
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Prometheus API", version="0.1.0")
+app = FastAPI(title="Prometheus API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,7 +79,7 @@ def _log_tool_call(conversation_id: int | None, tool: str, tool_input: dict, too
 
 async def _ollama_generate(model: str, prompt: str) -> str:
     payload = {"model": model, "prompt": prompt, "stream": False}
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=180) as client:
         r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
         r.raise_for_status()
         return r.json().get("response", "")
@@ -90,9 +101,21 @@ async def chat(req: ChatRequest):
         if hits:
             context = "\n\nRelevant memory:\n" + "\n---\n".join([h[0] for h in hits])
 
+    # If an image is attached, optionally enrich prompt using vision model.
+    image_context = ""
+    if req.image_paths:
+        first_image = req.image_paths[0]
+        analysis = vision_analysis.analyze(
+            image_path=first_image,
+            prompt=f"Analyze the image for this user question: {req.message}",
+            model=req.vision_model or "llava",
+        )
+        if analysis.get("ok"):
+            image_context = f"\n\nImage context from {first_image}:\n{analysis.get('response', '')[:2000]}"
+
     tool_results = []
     if req.use_tools:
-        tool_results = execute_tools(req.message)
+        tool_results = execute_tools(req.message, req.image_paths)
         for tr in tool_results:
             _log_tool_call(conversation_id, tr.get("tool", "unknown"), tr.get("input", {}), tr.get("output", {}))
 
@@ -104,6 +127,7 @@ async def chat(req: ChatRequest):
 User said:
 {req.message}
 {context}
+{image_context}
 {tool_context}
 Answer clearly and concisely."""
 
@@ -195,6 +219,7 @@ def recommendations():
 
 
 @app.post("/documents/upload")
+@app.post("/api/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
     data = await file.read()
     text = data.decode("utf-8", errors="ignore")
@@ -207,3 +232,90 @@ async def upload_document(file: UploadFile = File(...)):
                 (file.filename, cid, chunk_text, json.dumps({"filename": file.filename}), now_iso()),
             )
     return {"ok": True, "chunks": len(ids)}
+
+
+# --------------------------
+# Vision / Image Endpoints
+# --------------------------
+
+@app.post("/upload_image", response_model=ImageUploadResponse)
+@app.post("/api/upload_image", response_model=ImageUploadResponse)
+async def upload_image(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
+        raise HTTPException(status_code=400, detail="Unsupported image type")
+
+    ts_name = f"{int(time.time() * 1000)}_{Path(file.filename).name}"
+    dst = IMAGE_DIR / ts_name
+    with dst.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    return ImageUploadResponse(
+        ok=True,
+        filename=ts_name,
+        image_path=str(dst),
+        image_url=f"/api/images/{ts_name}",
+    )
+
+
+@app.get("/images/{filename}")
+@app.get("/api/images/{filename}")
+def serve_image(filename: str):
+    p = (IMAGE_DIR / filename).resolve()
+    if not str(p).startswith(str(IMAGE_DIR)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(str(p))
+
+
+@app.post("/detect_objects")
+@app.post("/api/detect_objects")
+def detect_objects(req: ObjectDetectRequest):
+    out = object_detection.execute(req.model_dump())
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "object detection failed"))
+    return out
+
+
+@app.post("/generate_image")
+@app.post("/api/generate_image")
+def generate_image(req: ImageGenerateRequest):
+    out = image_generation.execute(req.model_dump())
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "image generation failed"))
+    if out.get("filename"):
+        out["image_url"] = f"/api/images/{out['filename']}"
+    return out
+
+
+@app.post("/edit_image")
+@app.post("/api/edit_image")
+def edit_image(req: ImageEditRequest):
+    out = image_editing.execute(req.model_dump())
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "image editing failed"))
+    if out.get("filename"):
+        out["image_url"] = f"/api/images/{out['filename']}"
+    return out
+
+
+@app.post("/analyze_image")
+@app.post("/api/analyze_image")
+def analyze_image(req: VisionAnalyzeRequest):
+    out = vision_analysis.execute(req.model_dump())
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "vision analysis failed"))
+    return out
+
+
+@app.post("/extract_text")
+@app.post("/api/extract_text")
+def extract_text(req: OCRRequest):
+    out = ocr.execute(req.model_dump())
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error", "ocr failed"))
+    return out

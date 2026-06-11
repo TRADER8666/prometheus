@@ -1,147 +1,74 @@
-# Prometheus AI Workspace (MVP)
+# Prometheus AI Workspace
 
-Prometheus is a **locally-hostable AI workspace** focused on efficient core capabilities:
-- Chat with local LLMs via **Ollama**
-- RAG / memory with **ChromaDB**
-- Tool-augmented agent loop (code, file ops, web search, vector memory)
-- Clean Svelte chat interface
-- Zero-config install for Ubuntu/Debian (with optional NVIDIA acceleration)
+Prometheus is a locally-hostable AI workspace with chat + agent tools + vision.
 
-## System Requirements
+## Features
 
-### Minimum
-- Ubuntu/Debian (22.04+ recommended)
-- 4 CPU cores
-- 8 GB RAM
-- 20 GB free disk
+- Local LLM chat via **Ollama**
+- RAG / memory via **ChromaDB**
+- Agent tool loop for code/file/search/rag
+- **Vision tools**:
+  - YOLO object detection (`ultralytics`)
+  - Stable Diffusion text-to-image (`diffusers`)
+  - Stable Diffusion inpainting
+  - Ollama vision analysis (`llava` / `bakllava`)
+  - OCR via `easyocr`
+- Svelte UI with chat + dedicated vision panel
 
-### Recommended
-- 8+ CPU cores
-- 16+ GB RAM
-- NVIDIA GPU with 8+ GB VRAM (optional)
+## Architecture
 
-## Architecture Overview
+- Frontend (Svelte/Vite): `3000`
+- Backend (FastAPI): `8000`
+- Ollama (host native): `11434`
+- ChromaDB: `8001`
+- SearXNG: `8080`
+- Nginx reverse proxy: `80`
 
-- **Frontend (Svelte + Vite)**: port `3000`
-- **Backend (FastAPI, Python 3.11)**: port `8000`
-- **Ollama (host/native)**: port `11434`
-- **SearXNG**: port `8080`
-- **ChromaDB**: internal + host `8001`
-- **Nginx reverse proxy**: port `80` (routes `/api` to backend, `/` to frontend)
+Nginx routes:
+- `/` -> frontend
+- `/api/*` -> backend
+
+## Vision API Endpoints
+
+- `POST /api/upload_image` - upload image
+- `GET /api/images/{filename}` - serve uploaded/generated image
+- `POST /api/detect_objects` - YOLO detection
+- `POST /api/generate_image` - text-to-image
+- `POST /api/edit_image` - inpainting
+- `POST /api/analyze_image` - Ollama vision analysis
+- `POST /api/extract_text` - OCR
+
+(Backend also exposes non-prefixed aliases for direct local dev.)
+
+## Tool Call Syntax (chat)
 
 ```text
-Browser -> Nginx:80
-             |- /      -> Frontend:3000
-             \- /api/* -> FastAPI:8000 -> Ollama(host:11434), ChromaDB, SearXNG
+[[tool:detect_objects {"image_path":"/tmp/prometheus-images/sample.png"}]]
+[[tool:generate_image {"prompt":"cyberpunk city at night"}]]
+[[tool:edit_image {"image_path":"...","mask_path":"...","prompt":"add a tree"}]]
+[[tool:analyze_image {"image_path":"...","prompt":"what is in this image?"}]]
+[[tool:extract_text {"image_path":"..."}]]
 ```
 
-## Project Structure
+## Installation
 
-```text
-prometheus/
-├── install.sh
-├── docker-compose.yml
-├── prometheus.service
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py
-│   ├── database.py
-│   ├── models.py
-│   ├── agent.py
-│   ├── tools/
-│   │   ├── code_executor.py
-│   │   ├── file_ops.py
-│   │   ├── web_search.py
-│   │   └── rag.py
-│   └── cookbook.py
-├── frontend/
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── src/
-│   │   ├── App.svelte
-│   │   ├── main.js
-│   │   └── components/
-│   │       ├── Chat.svelte
-│   │       ├── Sidebar.svelte
-│   │       └── ModelSelector.svelte
-├── nginx/
-│   └── nginx.conf
-└── README.md
-```
-
-## Quick Start
-
-### 1) Clone repo
 ```bash
 git clone https://github.com/TRADER8666/prometheus.git
 cd prometheus
-```
-
-### 2) Run installer
-```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-Installer does:
-1. Installs system packages (Ubuntu/Debian)
-2. Installs Docker + Docker Compose
-3. Installs **Ollama natively** (not containerized)
-4. Detects GPU (NVIDIA priority, then AMD)
-5. Pulls models:
-   - `llama3.2:3b`
-   - `qwen2.5-coder:1.5b`
-   - `nomic-embed-text`
-6. Sets up ChromaDB + app directories
-7. Installs and enables `prometheus.service`
-8. Opens firewall ports and configures LAN access
+`install.sh` now also:
+- installs Python AI dependencies (`torch`, `diffusers`, `ultralytics`, `easyocr`, etc.)
+- detects CPU/GPU and attempts suitable PyTorch install
+- caches YOLO model weights (`yolov8n.pt`)
+- pulls Ollama vision model (`llava`)
+- creates `backend/workspace/images`
 
-### 3) Open UI
-- `http://<your-lan-ip>`
+## Local Development
 
-## API Endpoints (Core)
-
-- `POST /api/chat`
-- `POST /api/chat/stream` (SSE-style streaming)
-- `GET /api/conversations`
-- `POST /api/conversations`
-- `DELETE /api/conversations/{id}`
-- `GET /api/conversations/{id}/messages`
-- `GET /api/models`
-- `POST /api/models/pull`
-- `DELETE /api/models/{model}`
-- `GET /api/cookbook/recommendations`
-- `POST /api/documents/upload`
-
-## Tooling in Agent Loop
-
-The backend supports tool execution syntax in user messages:
-
-```text
-[[tool:search {"query":"latest fastapi release"}]]
-[[tool:file {"action":"list","path":"."}]]
-[[tool:code {"code":"print(2+2)"}]]
-[[tool:rag {"action":"query","text":"my uploaded docs"}]]
-```
-
-## Systemd Service
-
-Service file: `prometheus.service`
-
-Commands:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable prometheus
-sudo systemctl start prometheus
-sudo systemctl status prometheus
-sudo systemctl restart prometheus
-```
-
-## Development
-
-### Backend local dev
+### Backend
 ```bash
 cd backend
 python3.11 -m venv .venv
@@ -150,46 +77,15 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Frontend local dev
+### Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-## Troubleshooting
+## Notes
 
-### Ollama not reachable
-```bash
-systemctl status ollama
-curl http://127.0.0.1:11434/api/tags
-```
-If needed:
-```bash
-sudo systemctl restart ollama
-```
-
-### Docker permission denied
-You may need to re-login after installer adds your user to `docker` group.
-
-### GPU not used
-- Check `nvidia-smi`
-- Confirm drivers installed: `ubuntu-drivers devices`
-- Ensure Ollama can see GPU after service restart
-
-### SearXNG issues
-Check logs:
-```bash
-docker compose logs searxng
-```
-
-### Full stack status
-```bash
-docker compose ps
-docker compose logs --tail=100
-```
-
-## Security Note
-
-This MVP is LAN-oriented and currently does **not** include authentication/authorization.
-Do not expose directly to the public internet without adding auth, TLS hardening, and network controls.
+- CPU fallback is supported for all vision features (slower).
+- Diffusion and YOLO models are lazily loaded/cached to avoid repeated downloads.
+- For production internet exposure, add auth + TLS + security hardening.
