@@ -4,6 +4,16 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODELS=("llama3.2:3b" "qwen2.5-coder:1.5b" "nomic-embed-text" "llava")
 
+# Host-side venv is used for installer utilities on Ubuntu 24.04+ (PEP 668).
+VENV_DIR="/opt/prometheus/venv"
+VENV_BIN="${VENV_DIR}/bin"
+VENV_PYTHON="${VENV_BIN}/python"
+VENV_PIP="${VENV_BIN}/pip"
+
+# If set to 1, install full backend requirements on host as well.
+# Default keeps host Python footprint smaller since backend runs in Docker.
+INSTALL_HOST_FULL_PYTHON="${INSTALL_HOST_FULL_PYTHON:-0}"
+
 log() { echo "[prometheus-install] $*"; }
 need_sudo() { if [[ $EUID -ne 0 ]]; then echo "sudo"; fi; }
 SUDO="$(need_sudo)"
@@ -20,9 +30,28 @@ install_base_packages() {
   $SUDO apt-get update
   $SUDO apt-get install -y \
     ca-certificates curl gnupg lsb-release software-properties-common \
-    apt-transport-https net-tools ufw git jq rsync unzip \
+    apt-transport-https net-tools ufw git jq rsync unzip pciutils \
     python3 python3-pip python3-venv ffmpeg \
     libgl1 libglib2.0-0 libsndfile1 portaudio19-dev
+}
+
+setup_python_venv() {
+  local target_owner="${SUDO_USER:-$USER}"
+
+  if [[ ! -d "$VENV_DIR" ]]; then
+    log "Creating Python virtual environment at $VENV_DIR..."
+    $SUDO mkdir -p /opt/prometheus
+    $SUDO python3 -m venv "$VENV_DIR"
+    $SUDO chown -R "$target_owner":"$target_owner" /opt/prometheus
+  fi
+
+  if [[ ! -x "$VENV_PYTHON" || ! -x "$VENV_PIP" ]]; then
+    echo "Virtual environment is missing python/pip binaries at $VENV_DIR"
+    exit 1
+  fi
+
+  export PATH="$VENV_BIN:$PATH"
+  log "Using installer Python from venv: $VENV_PYTHON"
 }
 
 install_docker() {
@@ -63,29 +92,40 @@ setup_nvidia_or_amd() {
 }
 
 install_python_ai_deps() {
-  log "Installing Python AI dependencies..."
-  python3 -m pip install --upgrade pip || true
+  log "Installing host-side Python tooling in venv (Ubuntu 24.04 compatible)..."
+  "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
 
+  # Torch first so whisper/vision packages resolve efficiently.
   if command -v nvidia-smi >/dev/null 2>&1; then
-    python3 -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121 || true
+    "$VENV_PIP" install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121 || \
+      "$VENV_PIP" install torch torchvision --index-url https://download.pytorch.org/whl/cpu || true
   else
-    python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || true
+    "$VENV_PIP" install torch torchvision --index-url https://download.pytorch.org/whl/cpu || \
+      "$VENV_PIP" install torch torchvision || true
   fi
 
-  python3 -m pip install -r "$PROJECT_DIR/backend/requirements.txt" || true
+  if [[ "$INSTALL_HOST_FULL_PYTHON" == "1" ]]; then
+    log "INSTALL_HOST_FULL_PYTHON=1 -> installing full backend requirements on host venv"
+    "$VENV_PIP" install -r "$PROJECT_DIR/backend/requirements.txt" || true
+  else
+    log "Installing only installer utility packages on host (app runtime stays in Docker containers)"
+    "$VENV_PIP" install \
+      ultralytics diffusers transformers accelerate easyocr \
+      openai-whisper piper-tts playwright Pillow opencv-python numpy || true
+  fi
 
   log "Installing Playwright Chromium browser..."
-  python3 -m playwright install chromium || true
+  "$VENV_PYTHON" -m playwright install chromium || true
 
   log "Preloading Whisper small model..."
-  python3 - << 'PY'
+  "$VENV_PYTHON" - << 'PY'
 import whisper
 whisper.load_model('small')
 print('Whisper small ready')
 PY
 
   log "Downloading/caching YOLO model weights (yolov8n.pt)..."
-  python3 - << 'PY'
+  "$VENV_PYTHON" - << 'PY'
 from ultralytics import YOLO
 YOLO('yolov8n.pt')
 print('YOLO weights ready')
@@ -178,6 +218,7 @@ start_stack() {
 main() {
   require_debian
   install_base_packages
+  setup_python_venv
   install_docker
   setup_nvidia_or_amd
   install_python_ai_deps
