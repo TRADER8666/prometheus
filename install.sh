@@ -17,6 +17,7 @@ INSTALL_HOST_FULL_PYTHON="${INSTALL_HOST_FULL_PYTHON:-0}"
 log() { echo "[prometheus-install] $*"; }
 need_sudo() { if [[ $EUID -ne 0 ]]; then echo "sudo"; fi; }
 SUDO="$(need_sudo)"
+INSTALL_USER="${SUDO_USER:-$USER}"
 
 require_debian() {
   if [[ ! -f /etc/debian_version ]]; then
@@ -25,24 +26,53 @@ require_debian() {
   fi
 }
 
+preflight_checks() {
+  # Pre-flight checks
+  echo "Running pre-flight checks..."
+
+  # Check if user is in docker group (if docker is already installed)
+  if command -v docker &> /dev/null; then
+    if ! groups | grep -q docker; then
+      echo "⚠️  You are not in the 'docker' group yet."
+      echo "This script will add you, but you'll need to log out/in after."
+    fi
+  fi
+
+  # Check for write permissions to /opt
+  if [ ! -w "/opt" ] && [ ! -d "/opt/prometheus" ]; then
+    echo "Will need sudo to create /opt/prometheus"
+  fi
+
+  echo "✓ Pre-flight checks complete"
+  echo ""
+}
+
 install_base_packages() {
   log "Installing base packages..."
   $SUDO apt-get update
   $SUDO apt-get install -y \
     ca-certificates curl gnupg lsb-release software-properties-common \
-    apt-transport-https net-tools ufw git jq rsync unzip pciutils \
-    python3 python3-pip python3-venv ffmpeg \
+    apt-transport-https net-tools ufw git jq rsync unzip \
+    pciutils python3 python3-pip python3-venv ffmpeg \
     libgl1 libglib2.0-0 libsndfile1 portaudio19-dev
 }
 
 setup_python_venv() {
-  local target_owner="${SUDO_USER:-$USER}"
-
-  if [[ ! -d "$VENV_DIR" ]]; then
-    log "Creating Python virtual environment at $VENV_DIR..."
+  # Create virtual environment
+  if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating Python virtual environment at $VENV_DIR..."
     $SUDO mkdir -p /opt/prometheus
     $SUDO python3 -m venv "$VENV_DIR"
-    $SUDO chown -R "$target_owner":"$target_owner" /opt/prometheus
+    # Ensure current user owns the entire /opt/prometheus directory
+    $SUDO chown -R "$INSTALL_USER":"$INSTALL_USER" /opt/prometheus
+    echo "✓ Virtual environment created and permissions set"
+  fi
+
+  # Verify permissions
+  if [ ! -w "/opt/prometheus" ]; then
+    echo "⚠️  Warning: /opt/prometheus is not writable by current user"
+    echo "Attempting to fix permissions..."
+    $SUDO chown -R "$INSTALL_USER":"$INSTALL_USER" /opt/prometheus
   fi
 
   if [[ ! -x "$VENV_PYTHON" || ! -x "$VENV_PIP" ]]; then
@@ -68,12 +98,35 @@ install_docker() {
       $SUDO tee /etc/apt/sources.list.d/docker.list > /dev/null
     $SUDO apt-get update
     $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    $SUDO usermod -aG docker "$USER" || true
+    $SUDO usermod -aG docker "$INSTALL_USER" || true
   fi
 
   if ! docker compose version >/dev/null 2>&1; then
     log "Docker Compose plugin missing, installing docker-compose package fallback..."
     $SUDO apt-get install -y docker-compose
+  fi
+
+  # Check if user was just added to docker group
+  if ! groups | grep -q docker; then
+    echo ""
+    echo "============================================"
+    echo "⚠️  IMPORTANT: DOCKER GROUP WARNING"
+    echo "============================================"
+    echo "You were just added to the 'docker' group."
+    echo "For the changes to take effect, you MUST:"
+    echo ""
+    echo "Option 1 (Recommended):"
+    echo "  - Log out and log back in"
+    echo ""
+    echo "Option 2 (Quick fix for this session):"
+    echo "  - Run: newgrp docker"
+    echo "  - Then re-run this script: ./install.sh"
+    echo ""
+    echo "The script will now exit. Please follow one"
+    echo "of the options above and re-run the script."
+    echo "============================================"
+    echo ""
+    exit 1
   fi
 }
 
@@ -108,10 +161,11 @@ install_python_ai_deps() {
     log "INSTALL_HOST_FULL_PYTHON=1 -> installing full backend requirements on host venv"
     "$VENV_PIP" install -r "$PROJECT_DIR/backend/requirements.txt" || true
   else
-    log "Installing only installer utility packages on host (app runtime stays in Docker containers)"
+    log "Installing only installer utility packages on host (backend runtime stays in Docker containers)"
     "$VENV_PIP" install \
       ultralytics diffusers transformers accelerate easyocr \
-      openai-whisper piper-tts playwright Pillow opencv-python numpy || true
+      openai-whisper piper-tts playwright Pillow opencv-python numpy \
+      APScheduler croniter webrtcvad soundfile || true
   fi
 
   log "Installing Playwright Chromium browser..."
@@ -217,6 +271,7 @@ start_stack() {
 
 main() {
   require_debian
+  preflight_checks
   install_base_packages
   setup_python_venv
   install_docker
