@@ -14,6 +14,9 @@ VENV_PIP="${VENV_BIN}/pip"
 # Default keeps host Python footprint smaller since backend runs in Docker.
 INSTALL_HOST_FULL_PYTHON="${INSTALL_HOST_FULL_PYTHON:-0}"
 
+# Set to 1 when user is freshly added to docker group (no re-login needed)
+DOCKER_GROUP_FRESH=0
+
 log() { echo "[prometheus-install] $*"; }
 need_sudo() { if [[ $EUID -ne 0 ]]; then echo "sudo"; fi; }
 SUDO="$(need_sudo)"
@@ -33,8 +36,7 @@ preflight_checks() {
   # Check if user is in docker group (if docker is already installed)
   if command -v docker &> /dev/null; then
     if ! groups | grep -q docker; then
-      echo "⚠️  You are not in the 'docker' group yet."
-      echo "This script will add you, but you'll need to log out/in after."
+      echo "ℹ️  You are not in the 'docker' group yet. The script will handle this automatically."
     fi
   fi
 
@@ -106,27 +108,12 @@ install_docker() {
     $SUDO apt-get install -y docker-compose
   fi
 
-  # Check if user was just added to docker group
+  # Track if user was just added to docker group (needed later for sg docker)
   if ! groups | grep -q docker; then
-    echo ""
-    echo "============================================"
-    echo "⚠️  IMPORTANT: DOCKER GROUP WARNING"
-    echo "============================================"
-    echo "You were just added to the 'docker' group."
-    echo "For the changes to take effect, you MUST:"
-    echo ""
-    echo "Option 1 (Recommended):"
-    echo "  - Log out and log back in"
-    echo ""
-    echo "Option 2 (Quick fix for this session):"
-    echo "  - Run: newgrp docker"
-    echo "  - Then re-run this script: ./install.sh"
-    echo ""
-    echo "The script will now exit. Please follow one"
-    echo "of the options above and re-run the script."
-    echo "============================================"
-    echo ""
-    exit 1
+    DOCKER_GROUP_FRESH=1
+    log "You were just added to the 'docker' group. Will use 'sg docker' for container commands."
+  else
+    DOCKER_GROUP_FRESH=0
   fi
 }
 
@@ -256,13 +243,22 @@ EOC
   $SUDO systemctl restart ollama || true
 }
 
+docker_cmd() {
+  # Run a docker/docker-compose command, using sg docker if group was just added
+  if [[ "$DOCKER_GROUP_FRESH" -eq 1 ]]; then
+    sg docker -c "$*"
+  else
+    eval "$@"
+  fi
+}
+
 start_stack() {
   log "Starting Prometheus stack with Docker Compose..."
   cd /opt/prometheus
-  docker compose up -d --build
+  docker_cmd "docker compose up -d --build"
 
   log "Services status:"
-  docker compose ps
+  docker_cmd "docker compose ps"
 
   LAN_IP=$(hostname -I | awk '{print $1}')
   log "Prometheus UI should be available at: http://${LAN_IP}"
@@ -283,7 +279,8 @@ main() {
   install_systemd_service
   configure_lan
   start_stack
-  log "Install complete. If docker group was newly applied, re-login may be required."
+  log "✅ Install complete! Prometheus is running."
+  log "To update later, run: ./update.sh"
 }
 
 main "$@"
